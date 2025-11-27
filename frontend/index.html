@@ -161,16 +161,28 @@
       <h2>账号列表</h2>
       <div class="row">
         <button onclick="loadAccounts()">刷新列表</button>
-        <select id="filter_type" onchange="loadAccounts()" style="max-width:150px">
+        <select id="filter_type" onchange="applyFilters()" style="max-width:150px">
           <option value="all">全部类型</option>
           <option value="amazonq">Amazon Q</option>
           <option value="gemini">Gemini</option>
         </select>
+        <input id="filter_start_date" type="date" onchange="applyFilters()" placeholder="开始日期" style="max-width:150px" />
+        <input id="filter_end_date" type="date" onchange="applyFilters()" placeholder="结束日期" style="max-width:150px" />
+        <button class="btn-secondary" onclick="clearFilters()">清除筛选</button>
+        <button class="btn-danger" onclick="batchDelete()" id="batch_delete_btn" style="display:none">删除选中</button>
         <button class="btn-warning" onclick="testAllAccounts()">测试所有账号</button>
         <input id="test_message" placeholder="测试消息" value="Hello" style="max-width:200px" />
         <div id="test_status" class="chip" style="display:none"></div>
       </div>
       <div id="test_results" style="margin-top:12px"></div>
+      <div class="row" style="margin-top:12px">
+        <label class="switch">
+          <input id="select_all" type="checkbox" onchange="toggleSelectAll()" />
+          <span class="slider"></span>
+        </label>
+        <label style="color: var(--text)">全选</label>
+        <span id="selected_count" style="color: var(--muted); margin-left: 12px;">已选择: 0</span>
+      </div>
       <div class="list" id="accounts"></div>
 
       <div class="divider"></div>
@@ -319,6 +331,9 @@ async function checkHealth() {
   }
 }
 
+let allAccounts = [];
+let selectedIds = new Set();
+
 function renderAccounts(list) {
   const root = document.getElementById('accounts');
   root.innerHTML = '';
@@ -332,6 +347,26 @@ function renderAccounts(list) {
 
     const header = document.createElement('div');
     header.className = 'card-header';
+
+    const selectWrap = document.createElement('label');
+    selectWrap.className = 'switch';
+    selectWrap.style.width = '31px';
+    selectWrap.style.height = '31px';
+    const selectChk = document.createElement('input');
+    selectChk.type = 'checkbox';
+    selectChk.checked = selectedIds.has(acc.id);
+    selectChk.onchange = () => {
+      if (selectChk.checked) {
+        selectedIds.add(acc.id);
+      } else {
+        selectedIds.delete(acc.id);
+      }
+      updateSelectedCount();
+    };
+    const selectSlider = document.createElement('span');
+    selectSlider.className = 'slider';
+    selectWrap.appendChild(selectChk);
+    selectWrap.appendChild(selectSlider);
 
     const title = document.createElement('div');
     title.className = 'card-title';
@@ -362,6 +397,7 @@ function renderAccounts(list) {
     toggleWrap.appendChild(chk);
     toggleWrap.appendChild(slider);
 
+    header.appendChild(selectWrap);
     header.appendChild(title);
     header.appendChild(typeChip);
     header.appendChild(idChip);
@@ -441,18 +477,107 @@ function renderAccounts(list) {
 async function loadAccounts() {
   try {
     const r = await authFetch('/v2/accounts');
-    let accounts = await r.json();
-
-    // 应用类型筛选
-    const filterType = document.getElementById('filter_type').value;
-    if (filterType !== 'all') {
-      accounts = accounts.filter(acc => (acc.type || 'amazonq') === filterType);
-    }
-
-    renderAccounts(accounts);
+    allAccounts = await r.json();
+    applyFilters();
   } catch(e) {
     alert('加载失败：' + e);
   }
+}
+
+function applyFilters() {
+  let filtered = [...allAccounts];
+
+  const filterType = document.getElementById('filter_type').value;
+  if (filterType !== 'all') {
+    filtered = filtered.filter(acc => (acc.type || 'amazonq') === filterType);
+  }
+
+  const startDate = document.getElementById('filter_start_date').value;
+  const endDate = document.getElementById('filter_end_date').value;
+
+  if (startDate) {
+    filtered = filtered.filter(acc => acc.created_at >= startDate);
+  }
+
+  if (endDate) {
+    const endDateTime = endDate + 'T23:59:59';
+    filtered = filtered.filter(acc => acc.created_at <= endDateTime);
+  }
+
+  renderAccounts(filtered);
+}
+
+function clearFilters() {
+  document.getElementById('filter_type').value = 'all';
+  document.getElementById('filter_start_date').value = '';
+  document.getElementById('filter_end_date').value = '';
+  applyFilters();
+}
+
+function updateSelectedCount() {
+  const count = selectedIds.size;
+  document.getElementById('selected_count').textContent = `已选择: ${count}`;
+  document.getElementById('batch_delete_btn').style.display = count > 0 ? 'inline-block' : 'none';
+}
+
+function toggleSelectAll() {
+  const selectAll = document.getElementById('select_all').checked;
+  const root = document.getElementById('accounts');
+  const cards = root.querySelectorAll('.card');
+
+  if (selectAll) {
+    cards.forEach((card, idx) => {
+      const acc = allAccounts.filter(a => {
+        const filterType = document.getElementById('filter_type').value;
+        const startDate = document.getElementById('filter_start_date').value;
+        const endDate = document.getElementById('filter_end_date').value;
+
+        if (filterType !== 'all' && (a.type || 'amazonq') !== filterType) return false;
+        if (startDate && a.created_at < startDate) return false;
+        if (endDate && a.created_at > endDate + 'T23:59:59') return false;
+        return true;
+      })[idx];
+
+      if (acc) selectedIds.add(acc.id);
+    });
+  } else {
+    selectedIds.clear();
+  }
+
+  applyFilters();
+  updateSelectedCount();
+}
+
+async function batchDelete() {
+  if (selectedIds.size === 0) {
+    alert('请先选择要删除的账号');
+    return;
+  }
+
+  if (!confirm(`确认删除选中的 ${selectedIds.size} 个账号？`)) return;
+
+  let success = 0, failed = 0;
+  const ids = Array.from(selectedIds);
+
+  for (const id of ids) {
+    try {
+      const r = await authFetch('/v2/accounts/' + encodeURIComponent(id), { method: 'DELETE' });
+      if (r.ok) {
+        success++;
+      } else {
+        failed++;
+      }
+    } catch(e) {
+      failed++;
+    }
+  }
+
+  selectedIds.clear();
+  document.getElementById('select_all').checked = false;
+  updateSelectedCount();
+
+  alert(`删除完成: ${success} 成功, ${failed} 失败`);
+  await loadAccounts();
 }
 
 async function createAccount() {
@@ -658,7 +783,8 @@ async function importAccounts() {
 
     if (importType === 'amazonq') {
       if (parts.length < 6) {
-        setImportStatus(`第 ${i+1} 行格式错误`, false);
+        console.error(`第 ${i+1} 行格式错误: 期望6个字段，实际${parts.length}个`, line);
+        setImportStatus(`第 ${i+1} 行格式错误 (${parts.length}字段)`, false);
         failed++;
         continue;
       }
@@ -708,10 +834,13 @@ async function importAccounts() {
         success++;
         setImportStatus(`导入中... ${success}/${lines.length}`, true);
       } else {
+        const errorText = await r.text();
+        console.error(`第 ${i+1} 行导入失败:`, errorText);
         failed++;
         setImportStatus(`导入中... ${success} 成功, ${failed} 失败`, false);
       }
     } catch(e) {
+      console.error(`第 ${i+1} 行导入异常:`, e);
       failed++;
       setImportStatus(`导入中... ${success} 成功, ${failed} 失败`, false);
     }
