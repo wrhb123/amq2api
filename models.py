@@ -53,6 +53,7 @@ class ClaudeRequest:
     tools: Optional[List[ClaudeTool]] = None
     stream: bool = True
     system: Optional[Union[str, List[Dict[str, Any]]]] = None  # 可以是字符串或数组
+    thinking: Optional[Union[bool, Dict[str, Any]]] = None  # thinking 模式配置
 
 
 # ============================================================================

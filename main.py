@@ -1422,7 +1422,8 @@ def parse_claude_request(data: dict) -> ClaudeRequest:
         temperature=data.get("temperature"),
         tools=tools,
         stream=data.get("stream", True),
-        system=data.get("system")
+        system=data.get("system"),
+        thinking=data.get("thinking")
     )
 
 
