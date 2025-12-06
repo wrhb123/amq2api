@@ -188,7 +188,19 @@ async def create_message(request: Request, _: bool = Depends(verify_api_key)):
         # 智能路由：根据模型选择渠道
         specified_account_id = request.headers.get("X-Account-ID")
 
-        if not specified_account_id:
+        if specified_account_id:
+            # 指定了账号，检查账号类型并路由到对应渠道
+            account = get_account(specified_account_id)
+            if not account:
+                raise HTTPException(status_code=404, detail=f"账号不存在: {specified_account_id}")
+            if not account.get('enabled'):
+                raise HTTPException(status_code=403, detail=f"账号已禁用: {specified_account_id}")
+
+            account_type = account.get('type', 'amazonq')
+            if account_type == 'gemini':
+                logger.info(f"指定账号为 Gemini 类型，转发到 Gemini 渠道")
+                return await create_gemini_message(request)
+        else:
             # 没有指定账号时，根据模型智能选择渠道
             channel = get_random_channel_by_model(model)
 

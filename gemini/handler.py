@@ -104,7 +104,7 @@ async def handle_gemini_stream(response_stream: AsyncIterator[bytes], model: str
                                             # 开启 thinking 块
                                             if not content_block_started:
                                                 current_index += 1
-                                                content_blocks.append({'type': 'text'})
+                                                content_blocks.append({'type': 'thinking'})
                                                 yield format_sse_event("content_block_start", {
                                                     "type": "content_block_start",
                                                     "index": current_index,
@@ -123,6 +123,13 @@ async def handle_gemini_stream(response_stream: AsyncIterator[bytes], model: str
                                         # thinking 结束标记
                                         if 'thoughtSignature' in part:
                                             if content_block_started and not content_block_stop_sent:
+                                                # 先发送 signature_delta
+                                                yield format_sse_event("content_block_delta", {
+                                                    "type": "content_block_delta",
+                                                    "index": current_index,
+                                                    "delta": {"type": "signature_delta", "signature": part['thoughtSignature']}
+                                                })
+                                                # 再发送 content_block_stop
                                                 yield format_sse_event("content_block_stop", {
                                                     "type": "content_block_stop",
                                                     "index": current_index

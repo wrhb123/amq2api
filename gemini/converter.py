@@ -5,10 +5,71 @@ Gemini 请求格式转换器
 import logging
 import uuid
 import random
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Union
 from models import ClaudeRequest
 
 logger = logging.getLogger(__name__)
+
+# 默认 thinking budget
+DEFAULT_THINKING_BUDGET = 1024
+
+
+def get_thinking_config(thinking: Optional[Union[bool, Dict[str, Any]]]) -> Dict[str, Any]:
+    """
+    根据 Claude 请求的 thinking 参数生成 Gemini thinkingConfig
+
+    Args:
+        thinking: Claude thinking 配置，可以是:
+            - None: 默认启用 thinking
+            - bool: True 启用，False 禁用
+            - dict: {'type': 'enabled', 'budget_tokens': 1024} 等格式
+
+    Returns:
+        Gemini thinkingConfig 字典
+    """
+    # 默认启用 thinking
+    if thinking is None:
+        return {
+            "includeThoughts": True,
+            "thinkingBudget": DEFAULT_THINKING_BUDGET
+        }
+
+    # 布尔值
+    if isinstance(thinking, bool):
+        if thinking:
+            return {
+                "includeThoughts": True,
+                "thinkingBudget": DEFAULT_THINKING_BUDGET
+            }
+        else:
+            return {
+                "includeThoughts": False
+            }
+
+    # 字典格式
+    if isinstance(thinking, dict):
+        # 检查是否启用
+        thinking_type = thinking.get("type", "enabled")
+        is_enabled = thinking_type == "enabled"
+
+        if not is_enabled:
+            return {
+                "includeThoughts": False
+            }
+
+        # 获取 budget_tokens
+        budget = thinking.get("budget_tokens", DEFAULT_THINKING_BUDGET)
+
+        return {
+            "includeThoughts": True,
+            "thinkingBudget": budget
+        }
+
+    # 其他情况，默认启用
+    return {
+        "includeThoughts": True,
+        "thinkingBudget": DEFAULT_THINKING_BUDGET
+    }
 
 
 def convert_claude_to_gemini(claude_req: ClaudeRequest, project: str) -> Dict[str, Any]:
@@ -32,25 +93,33 @@ def convert_claude_to_gemini(claude_req: ClaudeRequest, project: str) -> Dict[st
             parts = [{"text": msg.content}]
         elif isinstance(msg.content, list):
             parts = []
-            thinking_parts = []
-            text_parts = []
-            tool_parts = []
+            pending_signature = None  # 保存待附加的 signature
 
-            for item in msg.content:
+            for i, item in enumerate(msg.content):
                 if isinstance(item, dict):
                     if item.get("type") == "thinking":
-                        # 处理 thinking 内容块，添加 thought 标记
-                        thinking_parts.append({
-                            "text": item.get("thinking", ""),
-                            "thought": True
-                        })
+                        continue
+                        # # 处理 thinking 内容块
+                        # part = {
+                        #     "text": item.get("thinking", ""),
+                        #     "thought": True
+                        # }
+                        # parts.append(part)
+                        # # 如果有 signature，保存到下一个 item（text 或 tool_use）
+                        # if "signature" in item:
+                        #     pending_signature = item["signature"]
                     elif item.get("type") == "text":
-                        text_parts.append({"text": item.get("text", "")})
+                        part = {"text": item.get("text", "")}
+                        # 如果有待附加的 signature，附加到这个 text part
+                        if pending_signature:
+                            part["thoughtSignature"] = pending_signature
+                            pending_signature = None
+                        parts.append(part)
                     elif item.get("type") == "image":
                         # 处理图片
                         source = item.get("source", {})
                         if source.get("type") == "base64":
-                            text_parts.append({
+                            parts.append({
                                 "inlineData": {
                                     "mimeType": source.get("media_type", "image/png"),
                                     "data": source.get("data", "")
@@ -58,19 +127,24 @@ def convert_claude_to_gemini(claude_req: ClaudeRequest, project: str) -> Dict[st
                             })
                     elif item.get("type") == "tool_use":
                         # 处理工具调用
-                        tool_parts.append({
+                        part = {
                             "functionCall": {
                                 "id": item.get("id"),
                                 "name": item.get("name"),
                                 "args": item.get("input", {})
                             }
-                        })
+                        }
+                        # 如果有待附加的 signature，附加到这个 tool_use part
+                        if pending_signature:
+                            part["thoughtSignature"] = pending_signature
+                            pending_signature = None
+                        parts.append(part)
                     elif item.get("type") == "tool_result":
                         # 处理工具结果
                         content = item.get("content", "")
                         if isinstance(content, list):
                             content = content[0].get("text", "") if content else ""
-                        tool_parts.append({
+                        parts.append({
                             "functionResponse": {
                                 "id": item.get("tool_use_id"),
                                 "name": item.get("name", ""),
@@ -78,10 +152,14 @@ def convert_claude_to_gemini(claude_req: ClaudeRequest, project: str) -> Dict[st
                             }
                         })
                 else:
-                    text_parts.append({"text": str(item)})
+                    parts.append({"text": str(item)})
 
-            # 按照 Gemini 要求的顺序组合: thinking -> text -> tool
-            parts = thinking_parts + text_parts + tool_parts
+            # 如果循环结束后还有未附加的 signature，创建空 text part
+            if pending_signature:
+                parts.append({
+                    "text": "",
+                    "thoughtSignature": pending_signature
+                })
         else:
             parts = [{"text": str(msg.content)}]
 
@@ -106,10 +184,7 @@ def convert_claude_to_gemini(claude_req: ClaudeRequest, project: str) -> Dict[st
                 "candidateCount": 1,
                 "maxOutputTokens": claude_req.max_tokens,
                 "stopSequences": ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"],
-                "thinkingConfig": {
-                    "includeThoughts": False,
-                    "thinkingBudget": 1024
-                }
+                "thinkingConfig": get_thinking_config(claude_req.thinking)
             },
             "sessionId": "-3750763034362895578",
         },
@@ -189,18 +264,7 @@ def map_claude_model_to_gemini(claude_model: str) -> str:
 def reorganize_tool_messages(contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     重新组织消息，确保每个 tool_use 后紧跟对应的 tool_result
-
-    Gemini 要求：每个 functionCall 后必须紧跟对应的 functionResponse
-    Claude Code 可能发送：
-    1. 一条 model 消息，parts 包含多个 functionCall
-    2. 下一条 user 消息，parts 包含多个 functionResponse
-
-    需要重新组织为：
-    1. model 消息，parts 包含 functionCall
-    2. user 消息，parts 包含对应的 functionResponse
-    3. model 消息，parts 包含下一个 functionCall
-    4. user 消息，parts 包含对应的 functionResponse
-    ...
+    保持 thinking 和 tool_use 的相对顺序，只移动 tool_result
 
     Args:
         contents: 原始消息列表
@@ -208,92 +272,57 @@ def reorganize_tool_messages(contents: List[Dict[str, Any]]) -> List[Dict[str, A
     Returns:
         重新组织后的消息列表
     """
-    # 收集所有 tool_use 和 tool_result
-    tool_uses = {}  # {tool_id: (msg_index, part_index, tool_use_data)}
-    tool_results = {}  # {tool_id: (msg_index, part_index, tool_result_data)}
+    # 收集所有 tool_result
+    tool_results = {}  # {tool_id: tool_result_part}
 
-    for msg_idx, msg in enumerate(contents):
-        for part_idx, part in enumerate(msg.get("parts", [])):
-            if "functionCall" in part:
-                tool_id = part["functionCall"].get("id")
-                if tool_id:
-                    tool_uses[tool_id] = (msg_idx, part_idx, part)
-            elif "functionResponse" in part:
+    for msg in contents:
+        for part in msg.get("parts", []):
+            if "functionResponse" in part:
                 tool_id = part["functionResponse"].get("id")
                 if tool_id:
-                    tool_results[tool_id] = (msg_idx, part_idx, part)
-
-    # 找出配对的 tool_use 和 tool_result
-    paired_tool_ids = set(tool_uses.keys()) & set(tool_results.keys())
+                    tool_results[tool_id] = part
 
     # 如果没有工具调用，直接返回
-    if not paired_tool_ids:
-        logger.info("没有找到需要重新组织的工具调用")
+    if not tool_results:
         return contents
-
-    logger.info(f"找到 {len(paired_tool_ids)} 对配对的工具调用")
 
     # 重新构建消息列表
     new_contents = []
-    processed_indices = set()  # 记录已处理的消息索引
 
-    for msg_idx, msg in enumerate(contents):
-        # 检查这条消息是否包含 tool_use
-        msg_tool_uses = []
-        other_parts = []
+    for msg in contents:
+        parts = msg.get("parts", [])
+        new_parts = []
 
-        for part in msg.get("parts", []):
+        for part in parts:
+            # 跳过 functionResponse，它们会被插入到对应的 functionCall 后面
+            if "functionResponse" in part:
+                continue
+
+            new_parts.append(part)
+
+            # 如果是 functionCall，立即插入对应的 functionResponse
             if "functionCall" in part:
                 tool_id = part["functionCall"].get("id")
-                if tool_id in paired_tool_ids:
-                    msg_tool_uses.append((tool_id, part))
-                else:
-                    # 没有配对的 tool_use，清理掉
-                    logger.warning(f"清理没有配对的 tool_use: {tool_id}")
-            elif "functionResponse" in part:
-                tool_id = part["functionResponse"].get("id")
-                if tool_id not in paired_tool_ids:
-                    # 没有配对的 tool_result，清理掉
-                    logger.warning(f"清理没有配对的 tool_result: {tool_id}")
-            else:
-                other_parts.append(part)
-
-        # 如果这条消息包含 tool_use
-        if msg_tool_uses:
-            # 先添加非工具调用的部分（如果有）
-            if other_parts:
-                new_contents.append({
-                    "role": msg["role"],
-                    "parts": other_parts
-                })
-
-            # 为每个 tool_use 创建一对消息
-            for tool_id, tool_use_part in msg_tool_uses:
-                # 添加 tool_use 消息
-                new_contents.append({
-                    "role": "model",
-                    "parts": [tool_use_part]
-                })
-
-                # 添加对应的 tool_result 消息
-                if tool_id in tool_results:
-                    _, _, tool_result_part = tool_results[tool_id]
+                if tool_id and tool_id in tool_results:
+                    # 创建包含 tool_use 的 model 消息
+                    new_contents.append({
+                        "role": "model",
+                        "parts": [part]
+                    })
+                    # 创建包含 tool_result 的 user 消息
                     new_contents.append({
                         "role": "user",
-                        "parts": [tool_result_part]
+                        "parts": [tool_results[tool_id]]
                     })
+                    new_parts.pop()  # 移除刚添加的 functionCall
 
-            processed_indices.add(msg_idx)
-        elif any("functionResponse" in part for part in msg.get("parts", [])):
-            # 这条消息只包含 tool_result，已经在上面处理过了
-            processed_indices.add(msg_idx)
-        else:
-            # 普通消息，直接添加
-            if msg_idx not in processed_indices:
-                new_contents.append(msg)
-                processed_indices.add(msg_idx)
+        # 如果还有其他 parts（thinking, text 等），添加到消息中
+        if new_parts:
+            new_contents.append({
+                "role": msg["role"],
+                "parts": new_parts
+            })
 
-    logger.info(f"重新组织后的消息数量: {len(new_contents)}")
     return new_contents
 
 
