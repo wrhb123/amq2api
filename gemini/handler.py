@@ -20,21 +20,6 @@ async def handle_gemini_stream(response_stream: AsyncIterator[bytes], model: str
     Yields:
         Claude 格式的 SSE 事件
     """
-    # 发送 message_start 事件
-    yield format_sse_event("message_start", {
-        "type": "message_start",
-        "message": {
-            "id": "msg_gemini",
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": model,
-            "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0}
-        }
-    })
-
     # 跟踪内容块和 token 统计
     content_blocks = []
     current_index = -1
@@ -42,6 +27,8 @@ async def handle_gemini_stream(response_stream: AsyncIterator[bytes], model: str
     output_tokens = 0
     content_block_started = False
     content_block_stop_sent = False
+    message_id = "msg_gemini"  # 默认 ID，会从响应中更新
+    message_start_sent = False  # 标记是否已发送 message_start
 
     # 处理流式响应
     buffer = ""
@@ -84,6 +71,24 @@ async def handle_gemini_stream(response_stream: AsyncIterator[bytes], model: str
                     try:
                         data = json.loads(data_str)
                         response_data = data.get('response', data)
+
+                        # 提取 responseId 并发送 message_start（仅第一次）
+                        if not message_start_sent and 'responseId' in response_data:
+                            message_id = response_data['responseId']
+                            yield format_sse_event("message_start", {
+                                "type": "message_start",
+                                "message": {
+                                    "id": message_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [],
+                                    "model": model,
+                                    "stop_reason": None,
+                                    "stop_sequence": None,
+                                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                                }
+                            })
+                            message_start_sent = True
 
                         # 提取 usageMetadata (如果存在)
                         if 'usageMetadata' in response_data:
